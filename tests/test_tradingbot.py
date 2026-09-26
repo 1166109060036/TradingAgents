@@ -1,0 +1,269 @@
+"""The trading bot: sizing, the paper ledger, the run loop and its live guard."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from tradingbot.brokers import make_broker
+from tradingbot.brokers.alpaca import AlpacaBroker, from_alpaca, to_alpaca
+from tradingbot.brokers.paper import PaperBroker
+from tradingbot.config import BotConfig, load_bot_config
+from tradingbot.engine import TradingBot
+from tradingbot.journal import Journal
+from tradingbot.sizing import NoTrade, OrderPlan, plan_order
+
+pytestmark = pytest.mark.unit
+
+PRICES = {"NVDA": 100.0, "AAPL": 200.0, "BTC-USD": 50_000.0, "PTT.BK": 33.0}
+
+
+def cfg(tmp_path, **kw) -> BotConfig:
+    base = {"watchlist": ["NVDA"], "state_dir": str(tmp_path), "commission_pct": 0.0}
+    return BotConfig.model_validate({**base, **kw})
+
+
+def paper(c: BotConfig, prices=PRICES) -> PaperBroker:
+    return make_broker(c, price_source=lambda t: prices[t])
+
+
+# --- sizing -----------------------------------------------------------------
+
+
+def test_buy_sizes_to_the_position_limit(tmp_path):
+    plan = plan_order(cfg(tmp_path), "NVDA", "Buy", 100.0, 0, cash=100_000, equity=100_000)
+    assert isinstance(plan, OrderPlan)
+    assert (plan.side, plan.quantity) == ("buy", 100)  # 10% of 100k at 100
+
+
+def test_overweight_takes_its_weight_of_the_limit(tmp_path):
+    plan = plan_order(cfg(tmp_path), "NVDA", "Overweight", 100.0, 0, cash=100_000, equity=100_000)
+    assert plan.quantity == 60
+
+
+def test_bullish_rating_never_sells_an_oversized_position(tmp_path):
+    result = plan_order(cfg(tmp_path), "NVDA", "Overweight", 100.0, 200, cash=80_000, equity=100_000)
+    assert isinstance(result, NoTrade)
+
+
+def test_bearish_rating_never_opens_a_position(tmp_path):
+    result = plan_order(cfg(tmp_path), "NVDA", "Underweight", 100.0, 0, cash=100_000, equity=100_000)
+    assert isinstance(result, NoTrade)
+
+
+def test_underweight_trims_and_sell_exits(tmp_path):
+    c = cfg(tmp_path)
+    trim = plan_order(c, "NVDA", "Underweight", 100.0, 100, cash=90_000, equity=100_000)
+    assert (trim.side, trim.quantity) == ("sell", 70)  # down to 30% of the 10k limit
+    exit_ = plan_order(c, "NVDA", "Sell", 100.0, 100, cash=90_000, equity=100_000)
+    assert (exit_.side, exit_.quantity) == ("sell", 100)
+
+
+@pytest.mark.parametrize("rating", ["Hold", "REVIEW"])
+def test_hold_and_review_never_trade(tmp_path, rating):
+    assert isinstance(plan_order(cfg(tmp_path), "NVDA", rating, 100.0, 5, 1e5, 1e5), NoTrade)
+
+
+def test_buy_keeps_the_cash_reserve(tmp_path):
+    c = cfg(tmp_path, min_cash_pct=0.05)
+    plan = plan_order(c, "NVDA", "Buy", 100.0, 0, cash=8_000, equity=100_000)
+    assert plan.quantity == 30  # 8k cash - 5k reserve
+
+
+def test_board_lots_round_down(tmp_path):
+    c = cfg(tmp_path, lot_sizes={"ptt.bk": 100})
+    plan = plan_order(c, "PTT.BK", "Buy", 33.0, 0, cash=100_000, equity=100_000)
+    assert plan.quantity == 300  # 10k / 33 = 303 -> 3 lots
+
+
+def test_fractional_quantities(tmp_path):
+    c = cfg(tmp_path, fractional=True)
+    plan = plan_order(c, "BTC-USD", "Buy", 50_000.0, 0, cash=100_000, equity=100_000)
+    assert plan.quantity == pytest.approx(0.2)
+
+
+def test_small_orders_are_skipped(tmp_path):
+    c = cfg(tmp_path, min_order_value=500)
+    assert isinstance(plan_order(c, "NVDA", "Buy", 100.0, 0, cash=1_000, equity=1_000), NoTrade)
+
+
+# --- config -----------------------------------------------------------------
+
+
+def test_config_rejects_live_paper_and_bad_weights(tmp_path):
+    with pytest.raises(ValueError):
+        cfg(tmp_path, live=True)
+    with pytest.raises(ValueError):
+        cfg(tmp_path, rating_weights={"Hold": 0.5})
+    with pytest.raises(ValueError):
+        cfg(tmp_path, analysts=["astrology"])
+
+
+def test_load_bot_config_reports_the_file(tmp_path):
+    path = tmp_path / "bot.json"
+    path.write_text(json.dumps({"watchlist": ["nvda", "NVDA", "aapl"]}))
+    assert load_bot_config(path).watchlist == ["NVDA", "AAPL"]
+    path.write_text("{")
+    with pytest.raises(ValueError, match="bot.json"):
+        load_bot_config(path)
+
+
+def test_graph_config_merges_nested_overrides(tmp_path):
+    c = cfg(tmp_path, tradingagents={"llm_provider": "anthropic",
+                                     "data_vendors": {"fundamental_data": "sec_edgar,yfinance"}})
+    gc = c.graph_config()
+    assert gc["llm_provider"] == "anthropic"
+    assert gc["data_vendors"]["fundamental_data"] == "sec_edgar,yfinance"
+    assert "core_stock_apis" in gc["data_vendors"]
+
+
+def test_live_needs_both_config_and_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY_ID", "k")
+    monkeypatch.setenv("ALPACA_API_SECRET_KEY", "s")
+    live = cfg(tmp_path, broker="alpaca", live=True)
+    with pytest.raises(PermissionError):
+        make_broker(live, allow_live=False, price_source=PRICES.get)
+    with pytest.raises(PermissionError):
+        make_broker(cfg(tmp_path, broker="alpaca"), allow_live=True, price_source=PRICES.get)
+    assert make_broker(live, allow_live=True, price_source=PRICES.get).base_url.startswith("https://api.")
+    assert "paper" in make_broker(cfg(tmp_path, broker="alpaca"), price_source=PRICES.get).base_url
+
+
+# --- paper broker -----------------------------------------------------------
+
+
+def test_paper_ledger_round_trip_persists(tmp_path):
+    c = cfg(tmp_path, commission_pct=0.001)
+    b = paper(c)
+    assert b.submit("NVDA", "buy", 10).status == "filled"
+    assert b.account().cash == pytest.approx(100_000 - 1000 - 1)
+    again = paper(c)  # reloaded from disk
+    assert again.holdings()["NVDA"].quantity == 10
+    assert again.submit("NVDA", "sell", 11).status == "rejected"
+    assert again.submit("NVDA", "sell", 10).status == "filled"
+    assert "NVDA" not in again.holdings()
+    assert again.submit("NVDA", "buy", 10_000).status == "rejected"
+
+
+# --- engine -----------------------------------------------------------------
+
+
+class FakeGraph:
+    def __init__(self, ratings):
+        self.ratings = ratings
+        self.calls = []
+
+    def propagate(self, ticker, trade_date, asset_type="stock", portfolio=None):
+        self.calls.append((ticker, trade_date, asset_type, portfolio))
+        rating = self.ratings[ticker]
+        if isinstance(rating, Exception):
+            raise rating
+        return {"final_trade_decision": f"**Rating**: {rating}"}, rating
+
+
+def make_bot(tmp_path, ratings, **kw):
+    c = cfg(tmp_path, **kw)
+    graph = FakeGraph(ratings)
+    seen = []
+
+    def factory(analysts):
+        seen.append(analysts)
+        return graph
+
+    bot = TradingBot(c, paper(c), graph_factory=factory, today=lambda: "2026-09-25")
+    return bot, graph, seen
+
+
+def test_run_once_trades_records_and_passes_the_book(tmp_path):
+    bot, graph, _ = make_bot(tmp_path, {"NVDA": "Buy", "AAPL": "Hold"}, watchlist=["NVDA", "AAPL"])
+    outcomes = bot.run_once()
+    assert outcomes[0].order.status == "filled" and outcomes[0].order.quantity == 100
+    assert outcomes[1].order is None and "Hold" in outcomes[1].skipped
+    # the second ticker's agents saw the position the first one opened
+    assert graph.calls[1][3].position_in("NVDA").quantity == 100
+    entries = Journal(tmp_path / "journal.jsonl").entries()
+    assert [e["rating"] for e in entries] == ["Buy", "Hold"]
+
+
+def test_second_run_same_day_is_skipped_unless_forced(tmp_path):
+    bot, graph, _ = make_bot(tmp_path, {"NVDA": "Buy"})
+    bot.run_once()
+    assert "already decided" in bot.run_once()[0].skipped
+    assert len(graph.calls) == 1
+    bot.run_once(force=True)
+    assert len(graph.calls) == 2
+
+
+def test_dry_run_sends_nothing_and_does_not_block_the_real_run(tmp_path):
+    bot, _, _ = make_bot(tmp_path, {"NVDA": "Buy"})
+    dry = bot.run_once(execute=False)[0]
+    assert dry.plan is not None and dry.order is None
+    assert bot.broker.holdings() == {}
+    assert bot.run_once()[0].order.status == "filled"
+
+
+def test_one_failing_ticker_does_not_stop_the_rest(tmp_path):
+    bot, _, _ = make_bot(tmp_path, {"NVDA": RuntimeError("boom"), "AAPL": "Buy"},
+                         watchlist=["NVDA", "AAPL"])
+    bad, good = bot.run_once()
+    assert "boom" in bad.error
+    assert good.order.status == "filled"
+
+
+def test_order_cap_per_run(tmp_path):
+    bot, _, _ = make_bot(tmp_path, {"NVDA": "Buy", "AAPL": "Buy"},
+                         watchlist=["NVDA", "AAPL"], max_orders_per_run=1)
+    first, second = bot.run_once()
+    assert first.order is not None
+    assert second.order is None and "max_orders_per_run" in second.skipped
+
+
+def test_crypto_runs_without_fundamentals(tmp_path):
+    bot, graph, seen = make_bot(tmp_path, {"BTC-USD": "Buy"}, watchlist=["BTC-USD"], fractional=True)
+    bot.run_once()
+    assert "fundamentals" not in seen[0]
+    assert graph.calls[0][2] == "crypto"
+
+
+# --- alpaca -----------------------------------------------------------------
+
+
+class FakeResponse:
+    def __init__(self, data, status=200):
+        self._data, self.status_code, self.text = data, status, json.dumps(data)
+
+    def json(self):
+        return self._data
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(self.status_code)
+
+
+class FakeSession:
+    def __init__(self):
+        self.headers, self.posted = {}, []
+
+    def get(self, url, timeout):
+        if url.endswith("/v2/account"):
+            return FakeResponse({"cash": "1000", "equity": "5000", "currency": "USD"})
+        return FakeResponse([{"symbol": "BTCUSD", "qty": "0.5", "avg_entry_price": "40000"}])
+
+    def post(self, url, json, timeout):
+        self.posted.append(json)
+        return FakeResponse({"id": "abc", "status": "accepted"})
+
+
+def test_alpaca_maps_symbols_and_orders(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY_ID", "k")
+    monkeypatch.setenv("ALPACA_API_SECRET_KEY", "s")
+    session = FakeSession()
+    b = AlpacaBroker(price_source=PRICES.get, session=session)
+    assert b.account().equity == 5000
+    assert b.holdings()["BTC-USD"].quantity == 0.5
+    result = b.submit("BTC-USD", "buy", 0.25)
+    assert result.status == "submitted" and result.order_id == "abc"
+    assert session.posted[0] == {"symbol": "BTC/USD", "qty": "0.25", "side": "buy",
+                                 "type": "market", "time_in_force": "gtc"}
+    assert (to_alpaca("NVDA"), from_alpaca("ETHUSD")) == ("NVDA", "ETH-USD")

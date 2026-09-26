@@ -348,6 +348,18 @@ tradingagents backtest NVDA,AAPL --start 2026-06-01 --end 2026-08-01 --every 7
 
 Each cell is scored on realized alpha against the instrument's regional benchmark, grouped by rating. Your own decision log is never written to, and re-running the same grid with `run_id=result.run_id` skips the cells that already ran, so an interrupted sweep continues where it stopped.
 
+## Automated trading bot
+
+`tradingbot` runs the agents over a watchlist on a schedule and turns each rating into a sized order under explicit risk limits. It trades a simulated paper account by default, supports Alpaca (paper, or live with both `live: true` in the config and `--live` on the command line), and records every decision in a journal.
+
+```bash
+tradingbot init bot.json
+tradingbot run -c bot.json --dry-run
+tradingbot loop -c bot.json --at 16:30
+```
+
+See [tradingbot/README.md](tradingbot/README.md) for the configuration and sizing rules.
+
 ## Reproducibility
 
 TradingAgents is LLM-driven, so two runs of the same ticker and date can differ. This is expected for a research tool built on language models, not a defect. The variation comes from a few distinct sources, and it helps to separate them.
