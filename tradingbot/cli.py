@@ -120,6 +120,31 @@ def init(
 
 
 @app.command()
+def setup(
+    config: str = typer.Option("bot.json", "--config", "-c", help="Where to write the bot config"),
+    env: str = typer.Option(".env", "--env", help="Where to store the API key"),
+):
+    """Answer a few questions to create bot.json and store your API key."""
+    from tradingbot.wizard import run_wizard
+
+    if not run_wizard(Path(config), Path(env), console):
+        raise typer.Exit(code=1)
+    console.print(f"Next: tradingbot check -c {config}")
+
+
+@app.command()
+def check(config: str = ConfigOpt, live: bool = typer.Option(False, "--live")):
+    """Check the API key, the broker connection and every symbol before trading."""
+    from tradingbot.wizard import run_checks
+
+    cfg = _load(config)
+    if not run_checks(cfg, lambda c: make_broker(c, allow_live=live), console):
+        console.print("[red]Fix the items marked FAIL, then run the check again.[/red]")
+        raise typer.Exit(code=1)
+    console.print(f"[green]All good.[/green] Try: tradingbot run -c {config} --dry-run")
+
+
+@app.command()
 def run(
     config: str = ConfigOpt,
     dry_run: bool = typer.Option(False, "--dry-run", help="Decide and size, but send no orders"),

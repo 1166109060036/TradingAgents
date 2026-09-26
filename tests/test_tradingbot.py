@@ -455,3 +455,87 @@ def test_unknown_mt5_symbol_fails_before_the_analysis(tmp_path):
     outcome = bot.run_once(tickers=["dogeusd"])[0]
     assert outcome.ticker == "DOGE-USD" and "symbol_map" in outcome.error
     assert graph.calls == []
+
+
+# --- setup wizard and checks ------------------------------------------------
+
+
+def test_wizard_config_for_exness_is_valid(tmp_path):
+    from tradingbot.wizard import Answers, build_config
+    data = build_config(Answers(broker="mt5", symbol_suffix="c", coins=("BTC", "SOL"),
+                                provider="anthropic", allow_short=True))
+    c = BotConfig.model_validate(data)
+    assert c.watchlist == ["BTC-USD", "SOL-USD"]
+    assert c.mt5.symbol_suffix == "c" and not c.live
+    assert c.rating_weights["Sell"] == -0.5 and c.allow_short
+    assert c.graph_config()["deep_think_llm"] == "claude-sonnet-5"
+
+
+def test_wizard_config_for_paper_is_long_only(tmp_path):
+    from tradingbot.wizard import Answers, build_config
+    c = BotConfig.model_validate(build_config(Answers(broker="paper", starting_cash=5000)))
+    assert c.broker == "paper" and c.starting_cash == 5000 and c.rating_weights["Sell"] == 0.0
+
+
+def test_set_env_value_replaces_blank_and_commented_lines(tmp_path):
+    from tradingbot.wizard import set_env_value
+    env = tmp_path / ".env"
+    env.write_text("OPENAI_API_KEY=\n#MT5_LOGIN=\nOTHER=1\n")
+    set_env_value(env, "OPENAI_API_KEY", "sk-1")
+    set_env_value(env, "MT5_LOGIN", "123")
+    set_env_value(env, "NEW_KEY", "x")
+    assert env.read_text() == "OPENAI_API_KEY=sk-1\nMT5_LOGIN=123\nOTHER=1\nNEW_KEY=x\n"
+
+
+def test_checks_report_missing_key_and_bad_symbol(tmp_path, monkeypatch):
+    from rich.console import Console
+
+    from tradingbot.brokers.mt5 import MT5Broker
+    from tradingbot.wizard import run_checks
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    c = cfg(tmp_path, broker="mt5", mt5={"symbol_suffix": "m"}, watchlist=["BTC-USD", "DOGE-USD"],
+            tradingagents={"llm_provider": "openai"})
+    console = Console(record=True, width=200)
+    ok = run_checks(c, lambda cfg_: MT5Broker(cfg_.mt5, mt5_module=FakeMT5()), console)
+    text = console.export_text()
+    assert not ok
+    assert "OPENAI_API_KEY is missing" in text
+    assert "OK  BTC-USD: price 50,000.00, min size 0.01" in text
+    assert "FAIL DOGE-USD" in text and "demo" in text
+    monkeypatch.setenv("OPENAI_API_KEY", "sk")
+    c2 = c.model_copy(update={"watchlist": ["BTC-USD"]})
+    assert run_checks(c2, lambda cfg_: MT5Broker(cfg_.mt5, mt5_module=FakeMT5()), Console(record=True))
+
+
+def test_wizard_flow_writes_config_and_key(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    from rich.console import Console
+
+    from tradingbot.wizard import run_wizard
+
+    answers = iter(["Exness via MetaTrader 5 (demo account first)", "Standard (BTCUSDm)",
+                    ["BTC", "ETH"], "anthropic", "sk-ant-1", "Thai", "20", True])
+
+    class Q:
+        def __init__(self, *a, validate=None, **kw):
+            self.validate = validate
+
+        def ask(self):
+            value = next(answers)
+            if self.validate is not None:
+                assert self.validate(value) is True
+            return value
+
+    fake = types.SimpleNamespace(select=Q, text=Q, password=Q, confirm=Q, checkbox=Q,
+                                 Choice=lambda title, checked=False: title)
+    monkeypatch.setitem(sys.modules, "questionary", fake)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")  # blank reads as unset; restored after the test
+    config, env = tmp_path / "bot.json", tmp_path / ".env"
+    assert run_wizard(config, env, Console(record=True))
+    c = load_bot_config(config)
+    assert c.broker == "mt5" and c.mt5.symbol_suffix == "m"
+    assert c.watchlist == ["BTC-USD", "ETH-USD"] and c.max_position_pct == 0.2 and c.allow_short
+    assert c.graph_config()["output_language"] == "Thai"
+    assert env.read_text() == "ANTHROPIC_API_KEY=sk-ant-1\n"
