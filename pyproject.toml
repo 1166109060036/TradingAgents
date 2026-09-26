@@ -39,11 +39,18 @@ bedrock = [
     "langchain-aws>=1.5.0",
 ]
 
+# MetaTrader 5 broker for tradingbot (Exness and other MT5 brokers). The
+# package ships for Windows only, where the MT5 terminal runs.
+mt5 = [
+    "MetaTrader5>=5.0.45; sys_platform == 'win32'",
+]
+
 [project.scripts]
 tradingagents = "cli.main:app"
+tradingbot = "tradingbot.cli:app"
 
 [tool.setuptools.packages.find]
-include = ["tradingagents*", "cli*"]
+include = ["tradingagents*", "cli*", "tradingbot*"]
 
 [tool.setuptools.package-data]
 cli = ["static/*"]
