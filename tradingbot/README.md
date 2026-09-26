@@ -13,6 +13,57 @@
 > ⚠️ นี่คือเครื่องมือวิจัย ผลของ LLM ไม่แน่นอนและอาจผิดพลาดได้ **ค่าเริ่มต้นคือ paper trading (เงินจำลอง)**
 > ทดลองด้วยเงินจำลองนาน ๆ และดูผล backtest ก่อนเสมอ ไม่ใช่คำแนะนำการลงทุน
 
+## เทรดคริปโตกับ Exness (MetaTrader 5)
+
+บอทส่งออเดอร์ CFD คริปโตเข้าบัญชี Exness ผ่านโปรแกรม MT5 ได้โดยตรง
+
+**สิ่งที่ต้องมี:** คอมพิวเตอร์หรือ VPS ที่เป็น **Windows** ติดตั้งโปรแกรม MetaTrader 5 ของ Exness และเปิดค้างไว้ขณะบอททำงาน
+(ไลบรารี `MetaTrader5` ของ Python ใช้ได้เฉพาะบน Windows)
+
+1. ติดตั้ง Python 3.10 ขึ้นไป แล้วติดตั้งบอท
+   ```bash
+   pip install ".[mt5]"
+   ```
+2. เปิด MT5 แล้วล็อกอินบัญชี **Demo** ของ Exness ก่อน
+   จากนั้นเปิด *Tools → Options → Expert Advisors* แล้วติ๊ก **Allow algorithmic trading**
+3. ดูชื่อสัญลักษณ์ใน Market Watch ว่าลงท้ายด้วยอะไร
+   - บัญชี Standard: `BTCUSDm` → `"symbol_suffix": "m"` (ค่าเริ่มต้นของ preset)
+   - บัญชี Standard Cent: `BTCUSDc` → `"symbol_suffix": "c"`
+   - บัญชี Pro / Raw Spread / Zero: `BTCUSD` → `"symbol_suffix": ""`
+   - ถ้าชื่อไม่ตรงรูปแบบนี้ ให้กำหนดเองทีละตัว: `"symbol_map": {"BTC-USD": "BTCUSDm"}`
+4. สร้าง config แล้วลองรัน
+   ```bash
+   tradingbot init bot.json --preset exness-crypto
+   tradingbot status -c bot.json            # ต่อ MT5 ได้ไหม เห็นยอดเงินไหม
+   tradingbot run -c bot.json --dry-run     # วิเคราะห์และคำนวณขนาด ยังไม่ส่งออเดอร์
+   tradingbot run -c bot.json               # ส่งออเดอร์จริงเข้าบัญชี Demo
+   tradingbot loop -c bot.json --at 08:00 --every-day   # คริปโตเทรดทุกวัน รวมเสาร์อาทิตย์
+   ```
+
+ถ้าไม่ได้ตั้ง `MT5_LOGIN` บอทจะใช้บัญชีที่ล็อกอินอยู่ใน MT5 ขณะนั้น
+หรือจะกำหนดใน `.env` ก็ได้: `MT5_LOGIN`, `MT5_PASSWORD`, `MT5_SERVER` (เช่น `Exness-MT5Trial7` ดูชื่อได้ตอนล็อกอิน)
+
+**ความปลอดภัยเฉพาะ MT5**
+- ถ้าบัญชีที่ล็อกอินอยู่เป็น **บัญชีเงินจริง** บอทจะไม่ยอมเทรด จนกว่าจะตั้ง `"live": true` และรันด้วย `--live`
+- บอทติดป้าย magic number ให้ออเดอร์ของตัวเอง และจะปิดหรือแก้เฉพาะออเดอร์ของบอทเท่านั้น ออเดอร์ที่คุณเปิดเองจะไม่ถูกแตะ (แต่ยังนับรวมในความเสี่ยงของพอร์ต)
+- **บอทไม่ใช้เลเวอเรจ**: มูลค่าสถานะรวมทุกตัวจะไม่เกิน equity ของบัญชี ถึง Exness จะให้เลเวอเรจสูงแค่ไหนก็ตาม
+- ขนาดออเดอร์ปัดลงตาม lot ขั้นต่ำและ step ของแต่ละสัญลักษณ์ (เช่น BTC 0.01 lot) ถ้าเงินน้อยจนไม่ถึง lot ขั้นต่ำ บอทจะข้ามไป
+- ถ้าบัญชีไม่มีสัญลักษณ์ที่ตั้งไว้ บอทจะแจ้ง error ก่อนเริ่มวิเคราะห์ จึงไม่เสียค่า LLM ไปฟรี ๆ
+
+### เปิด Short (ทำกำไรขาลง)
+
+CFD เปิดสถานะขายได้ ค่าเริ่มต้นปิดไว้ (Sell = ขายของที่ถือออกหมด) ถ้าจะเปิด:
+
+```json
+"allow_short": true,
+"rating_weights": {"Buy": 1.0, "Overweight": 0.5, "Underweight": 0.0, "Sell": -0.5}
+```
+
+แบบนี้ Sell จะเปิด short ขนาด 50% ของเพดาน ส่วน Underweight จะปิดสถานะ long ที่ถืออยู่ แต่จะไม่เปิด short
+น้ำหนักติดลบใช้ได้เฉพาะเรตติ้งฝั่งลบ และต้องตั้ง `allow_short` ก่อน
+
+> คริปโต CFD ผันผวนสูงและมีค่า swap ข้ามคืน ทั้งสองอย่างกินกำไรเมื่อถือนาน ให้ทดลองกับบัญชี Demo สักระยะก่อนเสมอ
+
 ## ติดตั้ง
 
 ```bash
@@ -44,13 +95,13 @@ tradingbot loop -c bot.json --at 16:30 # รันอัตโนมัติท
 | Overweight | 0.6 | ซื้อเพิ่มจนถึง 60% ของเพดาน |
 | Hold | – | ไม่ทำอะไร |
 | Underweight | 0.3 | ขายลดจนเหลือ 30% ของเพดาน |
-| Sell | 0.0 | ขายออกทั้งหมด |
+| Sell | 0.0 | ขายออกทั้งหมด (ตั้งติดลบ + `allow_short` เพื่อเปิด short) |
 | REVIEW | – | เอเจนต์ไม่ได้ให้เรตติ้งที่อ่านได้ ไม่เทรด ต้องให้คนดู |
 
 กฎความปลอดภัย:
 
 - เรตติ้งฝั่งบวก **ซื้ออย่างเดียว** ไม่ขาย และเรตติ้งฝั่งลบ **ขายอย่างเดียว** ไม่เปิดสถานะใหม่
-- Long-only: ไม่มีการ short
+- ไม่ short ยกเว้นเปิด `allow_short` และไม่ใช้เลเวอเรจ (มูลค่าสถานะรวมไม่เกิน equity)
 - เก็บเงินสดขั้นต่ำ `min_cash_pct` ไว้เสมอ, ข้ามออเดอร์ที่เล็กกว่า `min_order_value`, จำกัดจำนวนออเดอร์ต่อรอบด้วย `max_orders_per_run`
 - ปัดจำนวนหุ้นลงตาม `lot_sizes` (หุ้นไทยซื้อขายทีละ 100 หุ้น: `{"PTT.BK": 100}`) หรือเปิด `fractional` สำหรับคริปโต
 - หุ้นตัวหนึ่ง error ไม่ทำให้ตัวอื่นหยุด
@@ -60,11 +111,13 @@ tradingbot loop -c bot.json --at 16:30 # รันอัตโนมัติท
 | คีย์ | ความหมาย |
 |---|---|
 | `watchlist` | ticker แบบ Yahoo Finance เช่น `NVDA`, `PTT.BK`, `BTC-USD` |
-| `broker` | `paper` (จำลอง, ค่าเริ่มต้น) หรือ `alpaca` |
+| `broker` | `paper` (จำลอง, ค่าเริ่มต้น), `alpaca` หรือ `mt5` (Exness และโบรก MT5 อื่น) |
 | `live` | `true` = ใช้เงินจริง (ต้องใส่ `--live` ตอนรันด้วย) |
 | `analysts` | นักวิเคราะห์ที่ใช้: `market`, `social`, `news`, `fundamentals` (ลดเพื่อประหยัดค่า LLM) |
 | `currency`, `starting_cash`, `commission_pct` | สกุลเงิน, เงินตั้งต้น และค่าคอมมิชชันของบัญชี paper |
 | `tradingagents` | ค่าที่ส่งต่อให้ TradingAgents เช่น `llm_provider`, `deep_think_llm`, `quick_think_llm`, `max_debate_rounds`, `output_language` |
+| `allow_short` | อนุญาตให้น้ำหนักติดลบเปิด short (บัญชี CFD หรือ paper) |
+| `mt5` | `symbol_suffix`, `symbol_map`, `magic`, `deviation` (slippage สูงสุดเป็น point) |
 | `state_dir` | ที่เก็บบัญชี paper และ journal (ค่าเริ่มต้น `~/.tradingagents/bot`) |
 
 **หนึ่งบัญชีคือหนึ่งสกุลเงิน**: บัญชี paper ถือว่าราคาทุกตัวเป็นสกุลเดียวกับบัญชี
@@ -96,7 +149,7 @@ tradingbot loop -c bot.json --at 16:30 # รันอัตโนมัติท
 ## เพิ่มโบรกเกอร์อื่น
 
 สืบทอด `tradingbot.brokers.base.Broker` แล้วเขียน 4 เมธอด: `account()`, `holdings()`, `price()`, `submit()`
-จากนั้นเพิ่มใน `make_broker` (`tradingbot/brokers/__init__.py`) เช่น Binance, Interactive Brokers หรือโบรกไทยที่มี API (Settrade Open API)
+จากนั้นเพิ่มใน `make_broker` (`tradingbot/brokers/__init__.py`) เช่น Binance, OANDA หรือ Interactive Brokers
 
 ## ก่อนใช้เงินจริง
 

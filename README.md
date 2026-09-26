@@ -350,7 +350,7 @@ Each cell is scored on realized alpha against the instrument's regional benchmar
 
 ## Automated trading bot
 
-`tradingbot` runs the agents over a watchlist on a schedule and turns each rating into a sized order under explicit risk limits. It trades a simulated paper account by default, supports Alpaca (paper, or live with both `live: true` in the config and `--live` on the command line), and records every decision in a journal.
+`tradingbot` runs the agents over a watchlist on a schedule and turns each rating into a sized order under explicit risk limits. It trades a simulated paper account by default, supports Alpaca and MetaTrader 5 accounts such as Exness (demo, or live with both `live: true` in the config and `--live` on the command line), can short on CFD accounts when allowed, and records every decision in a journal.
 
 ```bash
 tradingbot init bot.json

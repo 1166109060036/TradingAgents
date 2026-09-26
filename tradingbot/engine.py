@@ -7,11 +7,11 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 
 from tradingagents.dataflows.date_window import get_current_date
-from tradingagents.dataflows.symbols import crypto_base
 from tradingbot.brokers.base import Broker, OrderResult
 from tradingbot.config import BotConfig
 from tradingbot.journal import Journal
 from tradingbot.sizing import NoTrade, OrderPlan, plan_order
+from tradingbot.symbols import canonical_ticker, crypto_coin
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ class TradingBot:
     def analysts_for(self, ticker: str) -> tuple[str, ...]:
         """Crypto has no company filings, so its run drops the fundamentals analyst."""
         analysts = self.cfg.analysts
-        if crypto_base(ticker):
+        if crypto_coin(ticker):
             analysts = [a for a in analysts if a != "fundamentals"] or ["market"]
         return tuple(analysts)
 
@@ -81,7 +81,7 @@ class TradingBot:
         self.broker.refresh()
         orders_sent = 0
         outcomes = []
-        for ticker in [t.upper() for t in (tickers or self.cfg.watchlist)]:
+        for ticker in [canonical_ticker(t) for t in (tickers or self.cfg.watchlist)]:
             outcome = TickerOutcome(ticker, trade_date)
             outcomes.append(outcome)
             if not force and self.journal.decided_on(ticker, trade_date):
@@ -104,7 +104,10 @@ class TradingBot:
 
     def _decide(self, outcome: TickerOutcome) -> None:
         ticker = outcome.ticker
-        asset_type = "crypto" if crypto_base(ticker) else "stock"
+        # Resolve the broker side first: a symbol the account does not offer should
+        # fail before the agents spend a full analysis on it.
+        rules = self.broker.quantity_rules(ticker)
+        asset_type = "crypto" if crypto_coin(ticker) else "stock"
         portfolio = self.broker.portfolio_context()
         graph = self._graph_for(self.analysts_for(ticker))
         final_state, rating = graph.propagate(
@@ -116,11 +119,13 @@ class TradingBot:
 
         acct = self.broker.account()
         held = self.broker.holdings().get(ticker)
+        step_kw = {"step": rules[0], "min_quantity": rules[1]} if rules else {}
         result = plan_order(
             self.cfg, ticker, rating,
             price=self.broker.price(ticker),
             held_quantity=held.quantity if held else 0.0,
-            cash=acct.cash, equity=acct.equity,
+            buying_power=acct.available, equity=acct.equity,
+            **step_kw,
         )
         if isinstance(result, NoTrade):
             outcome.skipped = result.reason

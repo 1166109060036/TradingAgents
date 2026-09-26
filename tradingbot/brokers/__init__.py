@@ -27,8 +27,12 @@ def make_broker(cfg: BotConfig, allow_live: bool = False, price_source=None) -> 
             currency=cfg.currency,
             price_source=price_source,
             commission_pct=cfg.commission_pct,
+            allow_short=cfg.allow_short,
         )
     if cfg.broker == "alpaca":
         from tradingbot.brokers.alpaca import AlpacaBroker
         return AlpacaBroker(price_source=price_source, live=cfg.live)
+    if cfg.broker == "mt5":
+        from tradingbot.brokers.mt5 import MT5Broker
+        return MT5Broker(cfg.mt5, live=cfg.live, price_fallback=price_source)
     raise ValueError(f"unknown broker {cfg.broker!r}")

@@ -51,6 +51,35 @@ EXAMPLE = {
 }
 
 
+PRESETS = {
+    "default": EXAMPLE,
+    # Crypto CFDs on an Exness MT5 account. Start on a demo account; shorts stay
+    # off until allow_short is set and Sell is given a negative weight.
+    "exness-crypto": {
+        "watchlist": ["BTC-USD", "ETH-USD", "SOL-USD"],
+        "broker": "mt5",
+        "live": False,
+        "analysts": ["market", "social", "news"],
+        "currency": "USD",
+        "max_position_pct": 0.15,
+        "rating_weights": {"Buy": 1.0, "Overweight": 0.5, "Underweight": 0.0, "Sell": 0.0},
+        "allow_short": False,
+        "min_cash_pct": 0.10,
+        "min_order_value": 10,
+        "max_orders_per_run": 5,
+        "mt5": {"symbol_suffix": "m", "symbol_map": {}, "magic": 26092601, "deviation": 50},
+        "state_dir": "~/.tradingagents/bot-exness",
+        "tradingagents": {
+            "llm_provider": "openai",
+            "deep_think_llm": "gpt-6-sol",
+            "quick_think_llm": "gpt-6-luna",
+            "max_debate_rounds": 1,
+            "max_risk_discuss_rounds": 1,
+        },
+    },
+}
+
+
 def _load(path: str) -> BotConfig:
     try:
         return load_bot_config(path)
@@ -62,25 +91,31 @@ def _load(path: str) -> BotConfig:
 def _broker(cfg: BotConfig, live: bool):
     try:
         return make_broker(cfg, allow_live=live)
-    except (PermissionError, ValueError) as exc:
+    except (PermissionError, ValueError, ConnectionError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
 
 
 def _banner(cfg: BotConfig, dry_run: bool) -> None:
-    mode = "LIVE MONEY" if cfg.live else ("paper" if cfg.broker == "paper" else f"{cfg.broker} paper")
+    mode = "LIVE MONEY" if cfg.live else ("simulated" if cfg.broker == "paper" else "demo/paper account")
     style = "bold red" if cfg.live else "green"
     console.print(f"[{style}]Broker: {cfg.broker} ({mode}){' — dry run, no orders' if dry_run else ''}[/{style}]")
 
 
 @app.command()
-def init(path: str = typer.Argument("bot.json", help="Where to write the example config")):
+def init(
+    path: str = typer.Argument("bot.json", help="Where to write the example config"),
+    preset: str = typer.Option("default", "--preset", help=f"One of: {', '.join(PRESETS)}"),
+):
     """Write an example bot config to start from."""
+    if preset not in PRESETS:
+        console.print(f"[red]Unknown preset {preset!r}; choose from {', '.join(PRESETS)}[/red]")
+        raise typer.Exit(code=1)
     target = Path(path)
     if target.exists():
         console.print(f"[yellow]{target} exists; not overwriting.[/yellow]")
         raise typer.Exit(code=1)
-    target.write_text(json.dumps(EXAMPLE, indent=2) + "\n", encoding="utf-8")
+    target.write_text(json.dumps(PRESETS[preset], indent=2) + "\n", encoding="utf-8")
     console.print(f"Wrote {target}. Edit the watchlist and LLM settings, then: tradingbot run -c {target}")
 
 
@@ -115,7 +150,8 @@ def _print_status(broker) -> None:
         except Exception:
             last = None
         value = f"{h.quantity * last:,.2f}" if last else "-"
-        pnl = f"{(last / h.average_price - 1) * 100:+.2f}" if last and h.average_price else "-"
+        direction = 1 if h.quantity > 0 else -1
+        pnl = f"{(last / h.average_price - 1) * 100 * direction:+.2f}" if last and h.average_price else "-"
         avg = f"{h.average_price:,.2f}" if h.average_price else "-"
         table.add_row(t, f"{h.quantity:g}", avg, f"{last:,.2f}" if last else "-", value, pnl)
     console.print(table)

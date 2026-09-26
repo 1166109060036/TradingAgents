@@ -13,6 +13,13 @@ class Account:
     cash: float
     equity: float
     currency: str
+    # Unlevered room for new exposure: equity less the gross value already held.
+    # None means the same as cash (a long-only cash account).
+    buying_power: float | None = None
+
+    @property
+    def available(self) -> float:
+        return self.cash if self.buying_power is None else self.buying_power
 
 
 @dataclass(frozen=True)
@@ -40,6 +47,13 @@ class Broker(ABC):
         """Drop anything cached, so a new run sizes against fresh prices."""
         return None
 
+    def quantity_rules(self, ticker: str) -> tuple[float | None, float] | None:
+        """The broker's (quantity step, minimum quantity) for a ticker, in units.
+
+        None leaves sizing to the config's lot sizes. A step of None is fractional.
+        """
+        return None
+
     @abstractmethod
     def account(self) -> Account: ...
 
@@ -59,7 +73,7 @@ class Broker(ABC):
         """The book as the TradingAgents decision agents read it."""
         acct = self.account()
         return PortfolioContext(
-            cash=acct.cash,
+            cash=acct.available,
             currency=acct.currency,
             positions=[
                 Position(ticker=h.ticker, quantity=h.quantity, average_price=h.average_price)
